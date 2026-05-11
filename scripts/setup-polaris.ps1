@@ -4,22 +4,50 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "Requesting Polaris access token..."
+# Конфігурація
+$ClientId = "root"
+$ClientSecret = "secret"
+
+$CatalogName = "polariscatalog"
+$CatalogRole = "catalog_admin"
+$PrincipalRole = "data_engineer"
+
+function Log-Step {
+    param([string]$Message)
+
+    Write-Host "`n==> $Message" -ForegroundColor Cyan
+}
+
+function Log-Success {
+    param([string]$Message)
+
+    Write-Host "[OK] $Message" -ForegroundColor Green
+}
+
+Log-Step "Requesting Polaris access token"
+
 $tokenResponse = Invoke-RestMethod `
     -Method Post `
     -Uri "$PolarisUrl/api/catalog/v1/oauth/tokens" `
     -ContentType "application/x-www-form-urlencoded" `
     -Body @{
         grant_type    = "client_credentials"
-        client_id     = "root"
-        client_secret = "secret"
+        client_id     = $ClientId
+        client_secret = $ClientSecret
         scope         = "PRINCIPAL_ROLE:ALL"
     }
 
+if (-not $tokenResponse.access_token) {
+    throw "Failed to obtain access token"
+}
+
 $accessToken = $tokenResponse.access_token
+
 $headers = @{
     Authorization = "Bearer $accessToken"
 }
+
+Log-Success "Access token received"
 
 function Invoke-PolarisJson {
     param(
@@ -29,6 +57,7 @@ function Invoke-PolarisJson {
     )
 
     $jsonBody = $null
+
     if ($null -ne $Body) {
         $jsonBody = $Body | ConvertTo-Json -Depth 10
     }
@@ -40,75 +69,108 @@ function Invoke-PolarisJson {
             -Headers $headers `
             -ContentType "application/json" `
             -Body $jsonBody | Out-Null
+
+        Write-Host "[OK] $Path" -ForegroundColor Green
     }
     catch {
         $statusCode = $_.Exception.Response.StatusCode.value__
+
         if ($statusCode -eq 409) {
-            Write-Host "Already exists: $Path"
+            Write-Host "[SKIP] Already exists: $Path" -ForegroundColor Yellow
             return
         }
 
+        Write-Host "[ERROR] Request failed: $Path" -ForegroundColor Red
         throw
     }
 }
 
-Write-Host "Creating Iceberg catalog polariscatalog..."
-Invoke-PolarisJson -Method Post -Path "/api/management/v1/catalogs" -Body @{
-    name = "polariscatalog"
-    type = "INTERNAL"
-    properties = @{
-        "default-base-location" = "s3://warehouse"
-        "s3.endpoint"          = "http://minio:9000"
-        "s3.path-style-access" = "true"
-        "s3.access-key-id"     = "admin"
-        "s3.secret-access-key" = "password"
-        "s3.region"            = "dummy-region"
-    }
-    storageConfigInfo = @{
-        roleArn          = "arn:aws:iam::000000000000:role/minio-polaris-role"
-        storageType      = "S3"
-        allowedLocations = @("s3://warehouse/*")
-    }
-}
+Log-Step "Creating Iceberg catalog"
 
-Write-Host "Creating catalog_admin catalog role..."
-Invoke-PolarisJson -Method Post -Path "/api/management/v1/catalogs/polariscatalog/catalog-roles" -Body @{
-    catalogRole = @{
-        name = "catalog_admin"
-    }
-}
+Invoke-PolarisJson `
+    -Method Post `
+    -Path "/api/management/v1/catalogs" `
+    -Body @{
+        name = $CatalogName
+        type = "INTERNAL"
 
-Write-Host "Granting catalog_admin role..."
-Invoke-PolarisJson -Method Put -Path "/api/management/v1/catalogs/polariscatalog/catalog-roles/catalog_admin/grants" -Body @{
-    grant = @{
-        type      = "catalog"
-        privilege = "CATALOG_MANAGE_CONTENT"
-    }
-}
+        properties = @{
+            "default-base-location" = "s3://warehouse"
+            "s3.endpoint"           = "http://minio:9000"
+            "s3.path-style-access"  = "true"
+            "s3.access-key-id"      = "admin"
+            "s3.secret-access-key"  = "password"
+            "s3.region"             = "dummy-region"
+        }
 
-Write-Host "Creating data_engineer principal role..."
-Invoke-PolarisJson -Method Post -Path "/api/management/v1/principal-roles" -Body @{
-    principalRole = @{
-        name = "data_engineer"
+        storageConfigInfo = @{
+            roleArn          = "arn:aws:iam::000000000000:role/minio-polaris-role"
+            storageType      = "S3"
+            allowedLocations = @("s3://warehouse/*")
+        }
     }
-}
 
-Write-Host "Connecting data_engineer to catalog_admin..."
-Invoke-PolarisJson -Method Put -Path "/api/management/v1/principal-roles/data_engineer/catalog-roles/polariscatalog" -Body @{
-    catalogRole = @{
-        name = "catalog_admin"
+Log-Step "Creating catalog role"
+
+Invoke-PolarisJson `
+    -Method Post `
+    -Path "/api/management/v1/catalogs/$CatalogName/catalog-roles" `
+    -Body @{
+        catalogRole = @{
+            name = $CatalogRole
+        }
     }
-}
 
-Write-Host "Assigning data_engineer to root..."
-Invoke-PolarisJson -Method Put -Path "/api/management/v1/principals/root/principal-roles" -Body @{
-    principalRole = @{
-        name = "data_engineer"
+Log-Step "Granting catalog permissions"
+
+Invoke-PolarisJson `
+    -Method Put `
+    -Path "/api/management/v1/catalogs/$CatalogName/catalog-roles/$CatalogRole/grants" `
+    -Body @{
+        grant = @{
+            type      = "catalog"
+            privilege = "CATALOG_MANAGE_CONTENT"
+        }
     }
-}
 
-Write-Host "Root principal roles:"
+Log-Step "Creating principal role"
+
+Invoke-PolarisJson `
+    -Method Post `
+    -Path "/api/management/v1/principal-roles" `
+    -Body @{
+        principalRole = @{
+            name = $PrincipalRole
+        }
+    }
+
+Log-Step "Connecting principal role to catalog role"
+
+Invoke-PolarisJson `
+    -Method Put `
+    -Path "/api/management/v1/principal-roles/$PrincipalRole/catalog-roles/$CatalogName" `
+    -Body @{
+        catalogRole = @{
+            name = $CatalogRole
+        }
+    }
+
+Log-Step "Assigning principal role to root"
+
+Invoke-PolarisJson `
+    -Method Put `
+    -Path "/api/management/v1/principals/root/principal-roles" `
+    -Body @{
+        principalRole = @{
+            name = $PrincipalRole
+        }
+    }
+
+Log-Step "Fetching root principal roles"
+
 Invoke-RestMethod `
     -Method Get `
     -Uri "$PolarisUrl/api/management/v1/principals/root/principal-roles" `
     -Headers $headers | ConvertTo-Json -Depth 10
+
+Log-Success "Polaris setup completed"

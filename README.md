@@ -10,8 +10,8 @@ Kafka Streams застосунок виконує агрегацію поїзд�
 - Java 17
 - Apache Kafka Streams
 - Maven
-- Docker, Docker Compose
-- Apache Kafka (Confluent)
+- Docker
+- Apache Kafka 
 - Kafka UI
 - Apache Iceberg
 - Apache Polaris
@@ -109,22 +109,22 @@ docker compose up -d --build
 ```
 
 Після запуску доступні сервіси:
-- Trino Web UI: `http://localhost:8080`
 - Kafka UI: `http://localhost:8088`
+- Trino Web UI: `http://localhost:8080`
 - MinIO UI: `http://localhost:9001` (`admin` / `password`)
-- MinIO API: `http://localhost:9000`
-- Polaris API: `http://localhost:8181`
+- MinIO API: `http://localhost:9001`
+- Polaris API: `http://localhost:9001`
 
 
 ## Налаштування Iceberg Lakehouse
 Конфігурація Trino для Iceberg REST catalog знаходиться у файлі `trino/catalog/iceberg.properties`.
 
-Після старту контейнерів створити каталог Polaris і ролі доступу можна командою:
+Після старту контейнерів створити каталог Polaris і ролі доступу командою:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\setup-polaris.ps1
 ```
 
-Після цього можна виконати демонстраційні SQL-запити в Trino:
+SQL-запити в Trino:
 ```powershell
 docker compose exec trino trino --server localhost:8080 --catalog iceberg -f /etc/trino/iceberg.sql
 ```
@@ -153,7 +153,6 @@ docker compose logs --tail=200 streams-processor
 
 4. Перевірити Iceberg-таблицю через Trino:
 ```sql
-docker compose exec -it trino trino
 SELECT * FROM iceberg.db.customers;
 ```
 
@@ -161,5 +160,3 @@ SELECT * FROM iceberg.db.customers;
 ```bash
 docker compose down
 ```
-
-

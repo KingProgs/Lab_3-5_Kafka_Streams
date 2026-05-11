@@ -181,7 +181,7 @@ public final class StreamsApplication {
                 );
 
         // =========================
-        // INPUT STREAM
+        // ВХІДНИЙ ПОТІК
         // =========================
 
         KStream<String, TripRecord> trips =
@@ -200,7 +200,7 @@ public final class StreamsApplication {
                 );
 
         // =========================
-        // TRIP COUNT BY DAY
+        // КІЛЬКІСТЬ ПОЇЗДОК ЗА ДНЯМИ
         // =========================
 
         KTable<String, Long> tripCountByDay =
@@ -225,7 +225,7 @@ public final class StreamsApplication {
                 );
 
         // =========================
-        // DURATION SUM BY DAY
+        // СУМА ТРИВАЛОСТІ ЗА ДНІ
         // =========================
 
         KTable<String, Long> durationSumByDay =
@@ -251,7 +251,7 @@ public final class StreamsApplication {
                 );
 
         // =========================
-        // AVERAGE DURATION
+        // СЕРЕДНЯ ТРИВАЛІСТЬ
         // =========================
 
         ValueJoiner<Long, Long, Double>
@@ -297,7 +297,7 @@ public final class StreamsApplication {
             );
 
         // =========================
-        // TRIP COUNT OUTPUT
+        // ВИХІД ЛІЧИЛЬНИКА ВІДКЛЮЧЕНЬ
         // =========================
 
         tripCountByDay
@@ -329,7 +329,7 @@ public final class StreamsApplication {
             );
 
         // =========================
-        // TOP START STATION
+        // ТОП СТАНЦІЯ ПОЧАТКУ
         // =========================
 
         KTable<String, Long>
@@ -423,7 +423,7 @@ public final class StreamsApplication {
             );
 
         // =========================
-        // TOP 3 STATIONS
+        // ТОП 3 СТАНЦІЇ
         // =========================
 
         KStream<String, StationCount>
@@ -535,7 +535,7 @@ public final class StreamsApplication {
     }
 
     // =========================
-    // PARSE INPUT JSON
+    // РОЗБІР ВХІДНИХ ДАННИХ JSON
     // =========================
 
     private static List<TripRecord>
@@ -612,7 +612,7 @@ public final class StreamsApplication {
     }
 
     // =========================
-    // TIMESTAMP EXTRACTOR
+    // ВИЛУЧАЛЬНИК ЧАСОВИХ МЕТОК
     // =========================
 
     static final class TripTimestampExtractor
@@ -779,7 +779,7 @@ public final class StreamsApplication {
     }
 
     // =========================
-    // DATA CLASSES
+    // КЛАСИ ДАНИХ
     // =========================
 
     static final class TripRecord {

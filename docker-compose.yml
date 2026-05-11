@@ -166,7 +166,7 @@ services:
       - local-iceberg-lakehouse
     volumes:
       - ./trino/catalog:/etc/trino/catalog:ro
-      - ./trino/demo-iceberg.sql:/etc/trino/demo-iceberg.sql:ro
+      - ./trino/iceberg.sql:/etc/trino/iceberg.sql:ro
 
   minio:
     image: minio/minio:latest
@@ -214,5 +214,4 @@ services:
 networks:
   local-iceberg-lakehouse:
     name: local-iceberg-lakehouse
-
 
