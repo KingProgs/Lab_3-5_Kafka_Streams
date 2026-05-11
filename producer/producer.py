@@ -172,7 +172,7 @@ def produce_rows() -> None:
         producer.close()
 
 
-# Entry Point
+# Точка входу
 
 if __name__ == "__main__":
     produce_rows()
