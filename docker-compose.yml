@@ -1,0 +1,218 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: zookeeper
+    networks:
+      - local-iceberg-lakehouse
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  broker1:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: broker1
+    depends_on:
+      - zookeeper
+    networks:
+      - local-iceberg-lakehouse
+    ports:
+      - "19092:19092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker1:9092,PLAINTEXT_HOST://localhost:19092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:19092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+  broker2:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: broker2
+    depends_on:
+      - zookeeper
+    networks:
+      - local-iceberg-lakehouse
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 2
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker2:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka-init
+    depends_on:
+      - broker1
+      - broker2
+    networks:
+      - local-iceberg-lakehouse
+    command: >
+      bash -c "
+        echo 'Waiting for Kafka brokers...';
+        cub kafka-ready -b broker1:9092 1 40 &&
+        cub kafka-ready -b broker2:9092 1 40 &&
+        kafka-topics --bootstrap-server broker1:9092 --create --if-not-exists --topic Topic1 --partitions 2 --replication-factor 2 &&
+        kafka-topics --bootstrap-server broker1:9092 --create --if-not-exists --topic Topic2 --partitions 2 --replication-factor 2 &&
+        kafka-topics --bootstrap-server broker1:9092 --create --if-not-exists --topic trip-avg-duration-by-day --partitions 2 --replication-factor 2 &&
+        kafka-topics --bootstrap-server broker1:9092 --create --if-not-exists --topic trip-count-by-day --partitions 2 --replication-factor 2 &&
+        kafka-topics --bootstrap-server broker1:9092 --create --if-not-exists --topic trip-top-start-station-by-day --partitions 2 --replication-factor 2 &&
+        kafka-topics --bootstrap-server broker1:9092 --create --if-not-exists --topic trip-top3-stations-by-day --partitions 2 --replication-factor 2 &&
+        kafka-topics --bootstrap-server broker1:9092 --list
+      "
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - broker1
+      - broker2
+    networks:
+      - local-iceberg-lakehouse
+    ports:
+      - "8088:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: lab3-5-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: broker1:9092,broker2:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+
+  producer:
+    build:
+      context: .
+      dockerfile: producer/Dockerfile
+    container_name: producer
+    depends_on:
+      - kafka-init
+    networks:
+      - local-iceberg-lakehouse
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: broker1:9092,broker2:9092
+      KAFKA_TOPIC_1: Topic1
+      KAFKA_TOPIC_2: Topic2
+      CSV_PATH: /app/data/Divvy_Trips_2019_Q4.csv
+      SEND_DELAY_SECONDS: 0.2
+      MAX_RECORDS: 200
+    volumes:
+      - ./data:/app/data:ro
+
+  streams-processor:
+    build:
+      context: .
+      dockerfile: kafka-streams-consumer/Dockerfile
+    container_name: streams-processor
+    depends_on:
+      - kafka-init
+    networks:
+      - local-iceberg-lakehouse
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: broker1:9092,broker2:9092
+      STREAMS_APPLICATION_ID: lab3-5-trip-analytics-streams
+      INPUT_TOPIC: Topic1
+      AVG_DURATION_TOPIC: trip-avg-duration-by-day
+      TRIP_COUNT_TOPIC: trip-count-by-day
+      TOP_START_STATION_TOPIC: trip-top-start-station-by-day
+      TOP3_STATIONS_TOPIC: trip-top3-stations-by-day
+
+  polaris:
+    image: apache/polaris:latest
+    container_name: polaris
+    platform: linux/amd64
+    depends_on:
+      - minio
+      - minio-client
+    ports:
+      - "8181:8181"
+      - "8182:8182"
+    networks:
+      - local-iceberg-lakehouse
+    environment:
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      AWS_REGION: dummy-region
+      AWS_ENDPOINT_URL_S3: http://minio:9000
+      AWS_ENDPOINT_URL_STS: http://minio:9000
+      POLARIS_BOOTSTRAP_CREDENTIALS: default-realm,root,secret
+      polaris.features.DROP_WITH_PURGE_ENABLED: "true"
+      polaris.realm-context.realms: default-realm
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8182/q/health/ready"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  trino:
+    image: trinodb/trino:latest
+    container_name: trino
+    depends_on:
+      - polaris
+    ports:
+      - "8080:8080"
+    environment:
+      TRINO_JVM_OPTS: -Xmx2G
+    networks:
+      - local-iceberg-lakehouse
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog:ro
+      - ./trino/demo-iceberg.sql:/etc/trino/demo-iceberg.sql:ro
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    volumes:
+      - ./minio_data:/data
+    environment:
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      AWS_REGION: dummy-region
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password
+      MINIO_DOMAIN: minio
+    networks:
+      local-iceberg-lakehouse:
+        aliases:
+          - warehouse.minio
+    ports:
+      - "9001:9001"
+      - "9000:9000"
+    command: ["server", "/data", "--console-address", ":9001"]
+
+  minio-client:
+    image: minio/mc:latest
+    container_name: minio-client
+    depends_on:
+      - minio
+    networks:
+      - local-iceberg-lakehouse
+    volumes:
+      - /tmp:/tmp
+    environment:
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      AWS_REGION: dummy-region
+    entrypoint: >
+      /bin/sh -c "
+      until (mc alias set minio http://minio:9000 admin password) do echo '...waiting...' && sleep 1; done;
+      mc rm -r --force minio/warehouse;
+      mc mb minio/warehouse;
+      mc anonymous set public minio/warehouse;
+      tail -f /dev/null
+      "
+
+networks:
+  local-iceberg-lakehouse:
+    name: local-iceberg-lakehouse
+
+
