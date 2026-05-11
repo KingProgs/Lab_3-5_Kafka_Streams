@@ -1,5 +1,6 @@
 package com.lab_3_5.streaming;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,23 +18,16 @@ import org.apache.kafka.streams.StreamsConfig;
 
 import org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler;
 
-import org.apache.kafka.streams.kstream.Consumed;
-import org.apache.kafka.streams.kstream.Grouped;
-import org.apache.kafka.streams.kstream.KStream;
-import org.apache.kafka.streams.kstream.KTable;
-import org.apache.kafka.streams.kstream.Materialized;
-import org.apache.kafka.streams.kstream.Produced;
-import org.apache.kafka.streams.kstream.Suppressed;
-import org.apache.kafka.streams.kstream.ValueJoiner;
+import org.apache.kafka.streams.kstream.*;
 
 import org.apache.kafka.streams.processor.TimestampExtractor;
+
+import java.nio.charset.StandardCharsets;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 
-import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,9 +37,6 @@ public final class StreamsApplication {
 
     private static final ObjectMapper MAPPER =
         new ObjectMapper();
-
-    private static final String DAY_STATION_DELIMITER =
-        "\u001F";
 
     private StreamsApplication() {
     }
@@ -101,12 +92,12 @@ public final class StreamsApplication {
 
         props.put(
             StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG,
-            Serdes.String().getClass().getName()
+            Serdes.StringSerde.class
         );
 
         props.put(
             StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG,
-            Serdes.String().getClass().getName()
+            JsonSerde.class
         );
 
         props.put(
@@ -132,7 +123,10 @@ public final class StreamsApplication {
         );
 
         KafkaStreams streams =
-            new KafkaStreams(builder.build(), props);
+            new KafkaStreams(
+                builder.build(),
+                props
+            );
 
         Runtime.getRuntime()
             .addShutdownHook(
@@ -154,6 +148,10 @@ public final class StreamsApplication {
         );
 
         streams.start();
+
+        System.out.println(
+            "Kafka Streams started"
+        );
     }
 
     private static void buildTopology(
@@ -168,23 +166,36 @@ public final class StreamsApplication {
         Serde<String> stringSerde =
             Serdes.String();
 
-        Serde<Long> longSerde =
-            Serdes.Long();
+        JsonSerde<TripEvent> tripSerde =
+            new JsonSerde<>(TripEvent.class);
 
-        JsonSerde<StationCount> stationCountSerde =
-            new JsonSerde<>(StationCount.class);
-
-        JsonSerde<TopStationsState>
-            topStationsStateSerde =
+        JsonSerde<DurationStats>
+            durationStatsSerde =
                 new JsonSerde<>(
-                    TopStationsState.class
+                    DurationStats.class
                 );
 
-        // =========================
-        // ВХІДНИЙ ПОТІК
-        // =========================
+        JsonSerde<StationStats>
+            stationStatsSerde =
+                new JsonSerde<>(
+                    StationStats.class
+                );
 
-        KStream<String, TripRecord> trips =
+        @SuppressWarnings("rawtypes")
+        JsonSerde<Map> mapSerde =
+            new JsonSerde<>(Map.class);
+
+        @SuppressWarnings("rawtypes")
+        JsonSerde<List> listSerde =
+            new JsonSerde<>(List.class);
+
+        TimeWindows dailyWindow =
+            TimeWindows.ofSizeAndGrace(
+                Duration.ofDays(1),
+                Duration.ZERO
+            );
+
+        KStream<String, TripEvent> trips =
             builder
                 .stream(
                     inputTopic,
@@ -196,95 +207,67 @@ public final class StreamsApplication {
                     )
                 )
                 .flatMapValues(
-                    StreamsApplication::parseTripRecord
-                );
-
-        // =========================
-        // КІЛЬКІСТЬ ПОЇЗДОК ЗА ДНЯМИ
-        // =========================
-
-        KTable<String, Long> tripCountByDay =
-            trips
-                .map(
+                    StreamsApplication::parseTrip
+                )
+                .selectKey(
                     (key, trip) ->
-                        KeyValue.pair(
-                            trip.tripDay,
-                            1L
+                        extractDate(
+                            trip.start_time
                         )
-                )
-                .groupByKey(
-                    Grouped.with(
-                        stringSerde,
-                        longSerde
-                    )
-                )
-                .count(
-                    Materialized.as(
-                        "trip-count-by-day-store"
-                    )
                 );
 
         // =========================
-        // СУМА ТРИВАЛОСТІ ЗА ДНІ
+        // AVG DURATION
         // =========================
 
-        KTable<String, Long> durationSumByDay =
-            trips
-                .map(
-                    (key, trip) ->
-                        KeyValue.pair(
-                            trip.tripDay,
-                            trip.durationSeconds
-                        )
+        trips
+            .groupByKey(
+                Grouped.with(
+                    stringSerde,
+                    tripSerde
                 )
-                .groupByKey(
-                    Grouped.with(
-                        stringSerde,
-                        longSerde
-                    )
+            )
+            .windowedBy(dailyWindow)
+            .aggregate(
+                DurationStats::new,
+                (
+                    day,
+                    trip,
+                    stats
+                ) ->
+                    stats.add(
+                        trip.tripduration
+                    ),
+                Materialized.with(
+                    stringSerde,
+                    durationStatsSerde
                 )
-                .reduce(
-                    Long::sum,
-                    Materialized.as(
-                        "duration-sum-by-day-store"
-                    )
-                );
-
-        // =========================
-        // СЕРЕДНЯ ТРИВАЛІСТЬ
-        // =========================
-
-        ValueJoiner<Long, Long, Double>
-            averageDurationJoiner =
-                (sumSeconds, tripCount) ->
-                    tripCount == 0
-                        ? 0.0
-                        : (double) sumSeconds
-                            / tripCount;
-
-        KTable<String, Double> avgDurationByDay =
-            durationSumByDay.join(
-                tripCountByDay,
-                averageDurationJoiner
-            );
-
-        avgDurationByDay
+            )
             .suppress(
-                Suppressed.untilTimeLimit(
-                    Duration.ofSeconds(5),
+                Suppressed.untilWindowCloses(
                     Suppressed.BufferConfig
                         .unbounded()
                 )
             )
             .toStream()
-            .mapValues(
-                (day, avgSeconds) ->
-                    toJson(
-                        Map.of(
-                            "date",
-                            day,
-                            "average_trip_duration_seconds",
-                            round2(avgSeconds)
+            .map(
+                (
+                    windowedKey,
+                    stats
+                ) ->
+                    KeyValue.pair(
+                        windowedKey.key(),
+                        toJson(
+                            Map.of(
+                                "date",
+                                windowedKey.key(),
+                                "average_trip_duration_seconds",
+                                round2(
+                                    stats.average()
+                                ),
+                                "trip_count",
+                                stats.count
+                            )
                         )
                     )
             )
@@ -297,26 +280,39 @@ public final class StreamsApplication {
             );
 
         // =========================
-        // ВИХІД ЛІЧИЛЬНИКА ВІДКЛЮЧЕНЬ
+        // TRIP COUNT
         // =========================
 
-        tripCountByDay
+        trips
+            .groupByKey(
+                Grouped.with(
+                    stringSerde,
+                    tripSerde
+                )
+            )
+            .windowedBy(dailyWindow)
+            .count()
             .suppress(
-                Suppressed.untilTimeLimit(
-                    Duration.ofSeconds(5),
+                Suppressed.untilWindowCloses(
                     Suppressed.BufferConfig
                         .unbounded()
                 )
             )
             .toStream()
-            .mapValues(
-                (day, count) ->
-                    toJson(
-                        Map.of(
-                            "date",
-                            day,
-                            "trip_count",
-                            count
+            .map(
+                (
+                    windowedKey,
+                    count
+                ) ->
+                    KeyValue.pair(
+                        windowedKey.key(),
+                        toJson(
+                            Map.of(
+                                "date",
+                                windowedKey.key(),
+                                "trip_count",
+                                count
+                            )
                         )
                     )
             )
@@ -329,88 +325,51 @@ public final class StreamsApplication {
             );
 
         // =========================
-        // ТОП СТАНЦІЯ ПОЧАТКУ
+        // TOP START STATION
         // =========================
 
-        KTable<String, Long>
-            startStationCountByDay =
-                trips
-                    .map(
-                        (key, trip) ->
-                            KeyValue.pair(
-                                compositeDayStationKey(
-                                    trip.tripDay,
-                                    trip.fromStation
-                                ),
-                                1L
-                            )
-                    )
-                    .groupByKey(
-                        Grouped.with(
-                            stringSerde,
-                            longSerde
-                        )
-                    )
-                    .count(
-                        Materialized.as(
-                            "start-station-count-by-day-store"
-                        )
-                    );
-
-        KTable<String, StationCount>
-            topStartStationByDay =
-                startStationCountByDay
-                    .toStream()
-                    .map(
-                        (dayStationKey, count) -> {
-
-                            DayStation dayStation =
-                                splitCompositeDayStationKey(
-                                    dayStationKey
-                                );
-
-                            return KeyValue.pair(
-                                dayStation.day,
-                                new StationCount(
-                                    dayStation.station,
-                                    count
-                                )
-                            );
-                        }
-                    )
-                    .groupByKey(
-                        Grouped.with(
-                            stringSerde,
-                            stationCountSerde
-                        )
-                    )
-                    .reduce(
-                        StreamsApplication
-                            ::maxStationCount,
-                        Materialized.as(
-                            "top-start-station-by-day-store"
-                        )
-                    );
-
-        topStartStationByDay
+        trips
+            .groupByKey(
+                Grouped.with(
+                    stringSerde,
+                    tripSerde
+                )
+            )
+            .windowedBy(dailyWindow)
+            .aggregate(
+                StationStats::new,
+                (
+                    day,
+                    trip,
+                    stats
+                ) ->
+                    stats.addStartStation(
+                        trip.from_station_name
+                    ),
+                Materialized.with(
+                    stringSerde,
+                    stationStatsSerde
+                )
+            )
             .suppress(
-                Suppressed.untilTimeLimit(
-                    Duration.ofSeconds(5),
+                Suppressed.untilWindowCloses(
                     Suppressed.BufferConfig
                         .unbounded()
                 )
             )
             .toStream()
-            .mapValues(
-                (day, stationCount) ->
-                    toJson(
-                        Map.of(
-                            "date",
-                            day,
-                            "station",
-                            stationCount.station,
-                            "trip_count",
-                            stationCount.count
+            .map(
+                (
+                    windowedKey,
+                    stats
+                ) ->
+                    KeyValue.pair(
+                        windowedKey.key(),
+                        toJson(
+                            stats
+                                .mostPopularStartStation(
+                                    windowedKey.key()
+                                )
                         )
                     )
             )
@@ -423,105 +382,54 @@ public final class StreamsApplication {
             );
 
         // =========================
-        // ТОП 3 СТАНЦІЇ
+        // TOP 3 STATIONS
         // =========================
 
-        KStream<String, StationCount>
-            stationCountsByDayUpdates =
-                trips
-                    .flatMap(
-                        (key, trip) ->
-                            List.of(
-                                KeyValue.pair(
-                                    compositeDayStationKey(
-                                        trip.tripDay,
-                                        trip.fromStation
-                                    ),
-                                    1L
-                                ),
-                                KeyValue.pair(
-                                    compositeDayStationKey(
-                                        trip.tripDay,
-                                        trip.toStation
-                                    ),
-                                    1L
-                                )
-                            )
-                    )
-                    .groupByKey(
-                        Grouped.with(
-                            stringSerde,
-                            longSerde
-                        )
-                    )
-                    .count(
-                        Materialized.as(
-                            "all-station-count-by-day-store"
-                        )
-                    )
-                    .toStream()
-                    .map(
-                        (dayStationKey, count) -> {
-
-                            DayStation dayStation =
-                                splitCompositeDayStationKey(
-                                    dayStationKey
-                                );
-
-                            return KeyValue.pair(
-                                dayStation.day,
-                                new StationCount(
-                                    dayStation.station,
-                                    count
-                                )
-                            );
-                        }
-                    );
-
-        KTable<String, TopStationsState>
-            top3StationsByDay =
-                stationCountsByDayUpdates
-                    .groupByKey(
-                        Grouped.with(
-                            stringSerde,
-                            stationCountSerde
-                        )
-                    )
-                    .aggregate(
-                        TopStationsState::new,
-                        (
-                            day,
-                            stationCount,
-                            aggregate
-                        ) ->
-                            aggregate
-                                .withStationCount(
-                                    stationCount.station,
-                                    stationCount.count
-                                ),
-                        Materialized.with(
-                            stringSerde,
-                            topStationsStateSerde
-                        )
-                    );
-
-        top3StationsByDay
+        trips
+            .groupByKey(
+                Grouped.with(
+                    stringSerde,
+                    tripSerde
+                )
+            )
+            .windowedBy(dailyWindow)
+            .aggregate(
+                StationStats::new,
+                (
+                    day,
+                    trip,
+                    stats
+                ) ->
+                    stats.addBothStations(
+                        trip.from_station_name,
+                        trip.to_station_name
+                    ),
+                Materialized.with(
+                    stringSerde,
+                    stationStatsSerde
+                )
+            )
             .suppress(
-                Suppressed.untilTimeLimit(
-                    Duration.ofSeconds(5),
+                Suppressed.untilWindowCloses(
                     Suppressed.BufferConfig
                         .unbounded()
                 )
             )
             .toStream()
-            .mapValues(
-                (day, state) ->
-                    toJson(
-                        Map.of(
-                            "date",
-                            day,
-                            "top_3_stations",
-                            state.top3AsList()
+            .map(
+                (
+                    windowedKey,
+                    stats
+                ) ->
+                    KeyValue.pair(
+                        windowedKey.key(),
+                        toJson(
+                            Map.of(
+                                "date",
+                                windowedKey.key(),
+                                "top_3_stations",
+                                stats.top3Stations()
+                            )
                         )
                     )
             )
@@ -535,18 +443,18 @@ public final class StreamsApplication {
     }
 
     // =========================
-    // РОЗБІР ВХІДНИХ ДАННИХ JSON
+    // JSON PARSER
     // =========================
 
-    private static List<TripRecord>
-        parseTripRecord(
-            String rawEventJson
+    private static List<TripEvent>
+        parseTrip(
+            String rawJson
         ) {
 
         try {
 
             JsonNode root =
-                MAPPER.readTree(rawEventJson);
+                MAPPER.readTree(rawJson);
 
             JsonNode payload =
                 root.path("payload");
@@ -558,52 +466,40 @@ public final class StreamsApplication {
                 return List.of();
             }
 
-            String startTime =
+            TripEvent trip =
+                new TripEvent();
+
+            trip.start_time =
                 payload
                     .path("start_time")
-                    .asText("")
-                    .trim();
+                    .asText("");
 
-            String fromStation =
+            trip.from_station_name =
                 payload
                     .path("from_station_name")
-                    .asText("")
-                    .trim();
+                    .asText("");
 
-            String toStation =
+            trip.to_station_name =
                 payload
                     .path("to_station_name")
-                    .asText("")
-                    .trim();
+                    .asText("");
 
-            double tripDuration =
+            trip.tripduration =
                 payload
                     .path("tripduration")
-                    .asDouble(-1.0);
+                    .asDouble(0);
 
             if (
-                startTime.length() < 10
-                    || fromStation.isEmpty()
-                    || toStation.isEmpty()
-                    || tripDuration < 0
+                trip.start_time.isBlank()
+                    || trip.from_station_name
+                        .isBlank()
+                    || trip.to_station_name
+                        .isBlank()
             ) {
                 return List.of();
             }
 
-            String day =
-                startTime.substring(0, 10);
-
-            long durationSeconds =
-                Math.round(tripDuration);
-
-            return List.of(
-                new TripRecord(
-                    day,
-                    durationSeconds,
-                    fromStation,
-                    toStation
-                )
-            );
+            return List.of(trip);
 
         } catch (Exception ignored) {
 
@@ -612,7 +508,7 @@ public final class StreamsApplication {
     }
 
     // =========================
-    // ВИЛУЧАЛЬНИК ЧАСОВИХ МЕТОК
+    // TIMESTAMP EXTRACTOR
     // =========================
 
     static final class TripTimestampExtractor
@@ -639,8 +535,7 @@ public final class StreamsApplication {
                     String startTime =
                         payload
                             .path("start_time")
-                            .asText("")
-                            .trim();
+                            .asText("");
 
                     if (!startTime.isBlank()) {
 
@@ -659,6 +554,22 @@ public final class StreamsApplication {
         }
     }
 
+    // =========================
+    // HELPERS
+    // =========================
+
+    private static String extractDate(
+        String startTime
+    ) {
+
+        return LocalDateTime
+            .parse(
+                startTime.replace(" ", "T")
+            )
+            .toLocalDate()
+            .toString();
+    }
+
     private static long extractTimestampMillis(
         String startTime
     ) {
@@ -669,70 +580,6 @@ public final class StreamsApplication {
             )
             .toInstant(ZoneOffset.UTC)
             .toEpochMilli();
-    }
-
-    private static String compositeDayStationKey(
-        String day,
-        String station
-    ) {
-
-        return day
-            + DAY_STATION_DELIMITER
-            + station;
-    }
-
-    private static DayStation
-        splitCompositeDayStationKey(
-            String value
-        ) {
-
-        int separator =
-            value.indexOf(
-                DAY_STATION_DELIMITER
-            );
-
-        if (separator < 0) {
-
-            return new DayStation(
-                value,
-                ""
-            );
-        }
-
-        String day =
-            value.substring(0, separator);
-
-        String station =
-            value.substring(
-                separator
-                    + DAY_STATION_DELIMITER.length()
-            );
-
-        return new DayStation(
-            day,
-            station
-        );
-    }
-
-    private static StationCount maxStationCount(
-        StationCount current,
-        StationCount incoming
-    ) {
-
-        if (incoming.count > current.count) {
-            return incoming;
-        }
-
-        if (
-            incoming.count == current.count
-                && incoming.station.compareTo(
-                    current.station
-                ) < 0
-        ) {
-            return incoming;
-        }
-
-        return current;
     }
 
     private static double round2(
@@ -758,7 +605,6 @@ public final class StreamsApplication {
         ) {
 
             throw new RuntimeException(
-                "Could not serialize JSON",
                 exception
             );
         }
@@ -779,126 +625,148 @@ public final class StreamsApplication {
     }
 
     // =========================
-    // КЛАСИ ДАНИХ
+    // DATA CLASSES
     // =========================
 
-    static final class TripRecord {
+    @JsonIgnoreProperties(
+        ignoreUnknown = true
+    )
+    static final class TripEvent {
 
-        final String tripDay;
-        final long durationSeconds;
-        final String fromStation;
-        final String toStation;
+        public String start_time;
 
-        TripRecord(
-            String tripDay,
-            long durationSeconds,
-            String fromStation,
-            String toStation
-        ) {
+        public double tripduration;
 
-            this.tripDay = tripDay;
-            this.durationSeconds =
-                durationSeconds;
-            this.fromStation =
-                fromStation;
-            this.toStation =
-                toStation;
-        }
+        public String from_station_name;
+
+        public String to_station_name;
     }
 
-    static final class DayStation {
+    static final class DurationStats {
 
-        final String day;
-        final String station;
+        public long count = 0;
 
-        DayStation(
-            String day,
-            String station
+        public double totalDuration = 0.0;
+
+        DurationStats add(
+            double duration
         ) {
 
-            this.day = day;
-            this.station = station;
-        }
-    }
+            count++;
 
-    static final class StationCount {
-
-        public String station;
-        public long count;
-
-        public StationCount() {
-        }
-
-        StationCount(
-            String station,
-            long count
-        ) {
-
-            this.station = station;
-            this.count = count;
-        }
-    }
-
-    static final class TopStationsState {
-
-        public Map<String, Long>
-            stationCounts =
-                new HashMap<>();
-
-        public TopStationsState() {
-        }
-
-        TopStationsState withStationCount(
-            String station,
-            long count
-        ) {
-
-            stationCounts.put(
-                station,
-                count
-            );
+            totalDuration += duration;
 
             return this;
         }
 
-        List<Map<String, Object>>
-            top3AsList() {
+        double average() {
 
-            return stationCounts
+            return count == 0
+                ? 0.0
+                : totalDuration / count;
+        }
+    }
+
+    static final class StationStats {
+
+        public Map<String, Long>
+            stations =
+                new HashMap<>();
+
+        StationStats addStartStation(
+            String station
+        ) {
+
+            add(station);
+
+            return this;
+        }
+
+        StationStats addBothStations(
+            String from,
+            String to
+        ) {
+
+            add(from);
+            add(to);
+
+            return this;
+        }
+
+        private void add(
+            String station
+        ) {
+
+            if (
+                station != null
+                    && !station.isBlank()
+            ) {
+
+                stations.merge(
+                    station,
+                    1L,
+                    Long::sum
+                );
+            }
+        }
+
+        Map<String, Object>
+            mostPopularStartStation(
+                String date
+            ) {
+
+            return stations
+                .entrySet()
+                .stream()
+                .max(
+                    Map.Entry.comparingByValue()
+                )
+                .map(
+                    entry -> {
+                        Map<String, Object> result = new HashMap<>();
+                        result.put("date", date);
+                        result.put("station", entry.getKey());
+                        result.put("trip_count", entry.getValue());
+                        return result;
+                    }
+                )
+                .orElseGet(() -> {
+                    Map<String, Object> result = new HashMap<>();
+                    result.put("date", date);
+                    result.put("station", "");
+                    result.put("trip_count", 0);
+                    return result;
+                });
+        }
+
+        List<Map<String, Object>>
+            top3Stations() {
+
+            return stations
                 .entrySet()
                 .stream()
                 .sorted(
-                    Comparator
-                        .comparingLong(
-                            (
-                                Map.Entry<
-                                    String,
-                                    Long
-                                > entry
-                            ) ->
-                                entry.getValue()
-                        )
+                    Map.Entry
+                        .<String, Long>
+                            comparingByValue()
                         .reversed()
-                        .thenComparing(
-                            Map.Entry::getKey
-                        )
                 )
                 .limit(3)
-                .collect(
-                    ArrayList::new,
-                    (list, entry) ->
-                        list.add(
-                            Map.of(
-                                "station",
-                                entry.getKey(),
-                                "trip_count",
-                                entry.getValue()
-                            )
-                        ),
-                    ArrayList::addAll
-                );
+                .map(
+                    entry -> {
+                        Map<String, Object> result = new HashMap<>();
+                        result.put("station", entry.getKey());
+                        result.put("trip_count", entry.getValue());
+                        return result;
+                    }
+                )
+                .toList();
         }
     }
+
+    // =========================
+    // JSON SERDE
+    // =========================
 
     static final class JsonSerde<T>
         implements Serde<T> {
@@ -906,10 +774,13 @@ public final class StreamsApplication {
         private final ObjectMapper mapper =
             new ObjectMapper();
 
-        private final Class<T> clazz;
+        private final Class<T> type;
 
-        JsonSerde(Class<T> clazz) {
-            this.clazz = clazz;
+        JsonSerde(
+            Class<T> type
+        ) {
+
+            this.type = type;
         }
 
         @Override
@@ -917,20 +788,16 @@ public final class StreamsApplication {
 
             return (topic, data) -> {
 
-                if (data == null) {
-                    return null;
-                }
-
                 try {
 
                     return mapper
-                        .writeValueAsBytes(data);
+                        .writeValueAsBytes(
+                            data
+                        );
 
                 } catch (Exception exception) {
 
                     throw new RuntimeException(
-                        "Could not serialize "
-                            + clazz.getSimpleName(),
                         exception
                     );
                 }
@@ -938,26 +805,31 @@ public final class StreamsApplication {
         }
 
         @Override
-        public Deserializer<T> deserializer() {
+        public Deserializer<T>
+            deserializer() {
 
             return (topic, data) -> {
 
-                if (data == null) {
-                    return null;
-                }
-
                 try {
 
+                    if (
+                        data == null
+                            || type == null
+                    ) {
+                        return null;
+                    }
+
                     return mapper.readValue(
-                        data,
-                        clazz
+                        new String(
+                            data,
+                            StandardCharsets.UTF_8
+                        ),
+                        type
                     );
 
                 } catch (Exception exception) {
 
                     throw new RuntimeException(
-                        "Could not deserialize "
-                            + clazz.getSimpleName(),
                         exception
                     );
                 }
