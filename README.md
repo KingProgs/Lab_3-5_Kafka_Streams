@@ -54,11 +54,11 @@ Lab_3-5/
 - `trip-top-start-station-by-day`
 - `trip-top3-stations-by-day`
 
-```
+
 
 ## Обчислення:
 
-### 1. Середня тривалість поїздки за день
+### 1. Середня тривалість поїздки за день 
 Output topic:
 
 ```text
@@ -67,7 +67,7 @@ trip-avg-duration-by-day
 
 ---
 
-### 2. Кількість поїздок за день
+### 2. Кількість поїздок за день 
 Output topic:
 
 ```text
